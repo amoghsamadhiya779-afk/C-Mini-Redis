@@ -1,4 +1,5 @@
 #include "../include/server.h"
+#include "../include/pubsub.h"
 #include <iostream>
 #include <algorithm>
 #include <cstring>
@@ -44,7 +45,6 @@ void Server::connect_to_master() {
     serv_addr.sin_port = htons(master_port);
 
     if (inet_pton(AF_INET, master_host.c_str(), &serv_addr.sin_addr) <= 0) {
-        // Simple fallback to localhost if inet_pton fails (for docker testing)
         inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
     }
 
@@ -66,7 +66,6 @@ void Server::connect_to_master() {
     client_parsers[master_socket] = std::make_unique<ClientParser>();
     client_reading[master_socket] = false;
 
-    // Send REPLICAOF handshake
     std::string handshake = "*1\r\n$9\r\nREPLICAOF\r\n";
 #ifndef _WIN32
     send(master_socket, handshake.c_str(), handshake.length(), 0);
@@ -130,6 +129,7 @@ void Server::handle_client_read(int client_socket) {
                 data.clear();
                 
                 if (cmd) {
+                    cmd->set_client(client_socket); // Give command context of who sent it
                     std::lock_guard<std::mutex> lock(cq_mutex);
                     command_queue.push({std::move(cmd), client_socket});
                 } else {
@@ -173,6 +173,7 @@ void Server::execute_commands() {
                 master_socket = -1;
             } else {
                 replicas.erase(std::remove(replicas.begin(), replicas.end(), task.client_socket), replicas.end());
+                PubSubEngine::getInstance().unsubscribe(task.client_socket);
                 std::cout << "Client disconnected: " << task.client_socket << "\n";
             }
             
@@ -191,7 +192,6 @@ void Server::execute_commands() {
             continue;
         }
 
-        // Replication Check
         if (task.cmd->is_replicaof()) {
             replicas.push_back(task.client_socket);
             std::cout << "🔗 New Follower connected (FD: " << task.client_socket << ")\n";
@@ -199,11 +199,19 @@ void Server::execute_commands() {
 
         std::string response = task.cmd->execute();
 
+        // PubSub Broadcasting
+        for (const auto& bcast : task.cmd->get_broadcasts()) {
+#ifndef _WIN32
+            send(bcast.fd, bcast.msg.c_str(), bcast.msg.length(), 0);
+#else
+            send(bcast.fd, bcast.msg.c_str(), bcast.msg.length(), 0);
+#endif
+        }
+
         if (task.cmd->is_write()) {
             broadcast_to_replicas(task.cmd->to_resp());
         }
         
-        // Do not send responses to the Master to avoid crashing its parser
         if (task.client_socket != master_socket) {
 #ifndef _WIN32
             send(task.client_socket, response.c_str(), response.length(), 0);

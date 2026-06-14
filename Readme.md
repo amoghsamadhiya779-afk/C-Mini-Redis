@@ -16,8 +16,9 @@ We abandoned `std::unordered_map` and standard containers to build a high-perfor
 - **Skip Lists (`ZSET`)**: A probabilistic multi-layered linked list enabling $O(\log N)$ inserts, deletes, and range queries for Sorted Sets.
 - **TTL (Time-To-Live)**: Lazy evaluation for key expiration.
 
-## Distributed Systems: Replication & Persistence
-- **Leader-Follower Replication**: The server supports massive horizontal scaling through asynchronous replication. Any node can be booted as a Follower and automatically stream live data from the Leader.
+## Distributed Systems: Replication, PubSub, & Persistence
+- **Leader-Follower Replication**: Massive horizontal scaling through asynchronous replication. Any node can be booted as a Follower and automatically stream live data from the Leader.
+- **Publish/Subscribe Engine**: A custom message broker allowing clients to subscribe to channels and instantly receive broadcast messages without database polling.
 - **RDB Snapshotting (`BGSAVE`)**: Utilizes the POSIX `fork()` system call to create a Copy-On-Write (COW) clone of the database in memory, serializing it to disk in the background with zero blocking to the main server.
 - **AOF (Append-Only File)**: A dedicated background thread flushes mutation commands to disk asynchronously.
 
@@ -35,26 +36,22 @@ docker build -t mini-redis:prod .
 docker run -d --rm --net host --name redis_leader mini-redis:prod ./mini_redis_server --port 6379
 ```
 
-### 3. Boot the Follower Node (Replication)
-```bash
-docker run -d --rm --net host --name redis_follower mini-redis:prod ./mini_redis_server --port 6380 --replicaof 127.0.0.1 6379
-```
+### 3. Connect via Custom CLI
+Connect to the Leader to write data or test the **Pub/Sub Broker**:
 
-### 4. Connect via Custom CLI
-Connect to the Leader to write data:
+**Terminal 1 (Subscriber):**
 ```bash
 docker run -it --rm --net host mini-redis:prod ./mini_redis_cli -p 6379
-127.0.0.1:6379> SET user:1 EliteCoder
-+OK
+127.0.0.1:6379> SUBSCRIBE sports
 ```
 
-Connect to the Follower to verify the replication stream:
+**Terminal 2 (Publisher):**
 ```bash
-docker run -it --rm --net host mini-redis:prod ./mini_redis_cli -p 6380
-127.0.0.1:6380> GET user:1
-$10
-EliteCoder
+docker run -it --rm --net host mini-redis:prod ./mini_redis_cli -p 6379
+127.0.0.1:6379> PUBLISH sports "Messi scores!"
 ```
+
+Terminal 1 will instantly receive the live broadcast!
 
 ## Supported Commands
 
@@ -65,6 +62,7 @@ EliteCoder
 | **DEL** | `DEL <key>` | $O(1)$ | Deletes a key from memory. |
 | **ZADD**| `ZADD <key> <score>` | $O(\log N)$ | Adds a value to the global Skip List with a given score. |
 | **BGSAVE**| `BGSAVE` | $O(N)$ | Forks a background process to save an RDB snapshot. |
-| **REPLICAOF**| `REPLICAOF` | $O(1)$ | Handshake command used by followers to stream data. |
+| **SUBSCRIBE**| `SUBSCRIBE <channel>` | $O(1)$ | Subscribes the client to a message broadcast channel. |
+| **PUBLISH**| `PUBLISH <channel> <msg>` | $O(K)$ | Broadcasts a message to all K subscribed clients. |
 
 Developed as an elite deep-dive into Distributed Systems, Operating Systems, Networking, and Low-Level Algorithm Design.

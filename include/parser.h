@@ -5,6 +5,11 @@
 #include <unordered_map>
 #include <functional>
 
+struct BroadcastMsg {
+    int fd;
+    std::string msg;
+};
+
 // Command Interface
 class ICommand {
 public:
@@ -12,6 +17,8 @@ public:
     virtual bool is_write() const { return false; }
     virtual bool is_replicaof() const { return false; }
     virtual std::string to_resp() const { return ""; }
+    virtual void set_client(int fd) {}
+    virtual std::vector<BroadcastMsg> get_broadcasts() const { return {}; }
     virtual ~ICommand() = default;
 };
 

@@ -1,8 +1,8 @@
 #include "../include/parser.h"
 #include "../include/cache_engine.h"
+#include "../include/pubsub.h"
 #include <sstream>
 
-// Helper to convert args back to raw RESP format for replication broadcast
 std::string to_resp_array(const std::vector<std::string>& args) {
     std::string resp = "*" + std::to_string(args.size()) + "\r\n";
     for (const auto& arg : args) {
@@ -21,11 +21,7 @@ class SetCommand : public ICommand {
 public:
     SetCommand(const std::vector<std::string>& args, std::string k, std::string v, long long e=0) 
         : key(k), val(v), exp(e), raw_args(args) {}
-    
-    std::string execute() override {
-        CacheEngine::getInstance().set(key, val, exp);
-        return "+OK\r\n";
-    }
+    std::string execute() override { CacheEngine::getInstance().set(key, val, exp); return "+OK\r\n"; }
     bool is_write() const override { return true; }
     std::string to_resp() const override { return to_resp_array(raw_args); }
 };
@@ -37,7 +33,7 @@ public:
     std::string execute() override {
         auto val = CacheEngine::getInstance().get(key);
         if (val) return "$" + std::to_string(val->length()) + "\r\n" + *val + "\r\n";
-        return "$-1\r\n"; // Nil
+        return "$-1\r\n";
     }
 };
 
@@ -46,41 +42,56 @@ class DelCommand : public ICommand {
     std::vector<std::string> raw_args;
 public:
     DelCommand(const std::vector<std::string>& args, std::string k) : key(k), raw_args(args) {}
-    std::string execute() override {
-        return CacheEngine::getInstance().del(key) ? ":1\r\n" : ":0\r\n";
-    }
+    std::string execute() override { return CacheEngine::getInstance().del(key) ? ":1\r\n" : ":0\r\n"; }
     bool is_write() const override { return true; }
     std::string to_resp() const override { return to_resp_array(raw_args); }
 };
 
 class ZAddCommand : public ICommand {
-    std::string key; 
-    double score;
-    std::vector<std::string> raw_args;
+    std::string key; double score; std::vector<std::string> raw_args;
 public:
     ZAddCommand(const std::vector<std::string>& args, std::string k, double s) : key(k), score(s), raw_args(args) {}
-    std::string execute() override {
-        CacheEngine::getInstance().zadd(key, score);
-        return ":1\r\n";
-    }
+    std::string execute() override { CacheEngine::getInstance().zadd(key, score); return ":1\r\n"; }
     bool is_write() const override { return true; }
     std::string to_resp() const override { return to_resp_array(raw_args); }
 };
 
 class BgSaveCommand : public ICommand {
 public:
-    std::string execute() override {
-        CacheEngine::getInstance().bgsave();
-        return "+Background saving started\r\n";
-    }
+    std::string execute() override { CacheEngine::getInstance().bgsave(); return "+Background saving started\r\n"; }
 };
 
 class ReplicaOfCommand : public ICommand {
 public:
-    std::string execute() override {
-        return "+OK\r\n";
-    }
+    std::string execute() override { return "+OK\r\n"; }
     bool is_replicaof() const override { return true; }
+};
+
+// PUBSUB COMMANDS
+class SubscribeCommand : public ICommand {
+    std::string channel;
+    int client_socket;
+public:
+    SubscribeCommand(std::string c) : channel(c), client_socket(-1) {}
+    void set_client(int fd) override { client_socket = fd; }
+    std::string execute() override {
+        PubSubEngine::getInstance().subscribe(client_socket, channel);
+        return "*3\r\n$9\r\nsubscribe\r\n$" + std::to_string(channel.length()) + "\r\n" + channel + "\r\n:1\r\n";
+    }
+};
+
+class PublishCommand : public ICommand {
+    std::string channel, message;
+    std::vector<BroadcastMsg> broadcasts;
+public:
+    PublishCommand(std::string c, std::string m) : channel(c), message(m) {}
+    std::string execute() override {
+        auto subs = PubSubEngine::getInstance().get_subscribers(channel);
+        std::string pub_msg = "*3\r\n$7\r\nmessage\r\n$" + std::to_string(channel.length()) + "\r\n" + channel + "\r\n$" + std::to_string(message.length()) + "\r\n" + message + "\r\n";
+        for (int fd : subs) broadcasts.push_back({fd, pub_msg});
+        return ":" + std::to_string(subs.size()) + "\r\n";
+    }
+    std::vector<BroadcastMsg> get_broadcasts() const override { return broadcasts; }
 };
 
 // ---------------------------------------------------------
@@ -93,23 +104,22 @@ CommandFactory::CommandFactory() {
         if (args.size() >= 5 && args[3] == "EX") exp = std::stoll(args[4]);
         return std::make_unique<SetCommand>(args, args[1], args[2], exp);
     };
-    factory["GET"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
-        if (args.size() < 2) return nullptr;
-        return std::make_unique<GetCommand>(args[1]);
+    factory["GET"] = [](const std::vector<std::string>& args) {
+        if (args.size() < 2) return nullptr; return std::make_unique<GetCommand>(args[1]);
     };
-    factory["DEL"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
-        if (args.size() < 2) return nullptr;
-        return std::make_unique<DelCommand>(args, args[1]);
+    factory["DEL"] = [](const std::vector<std::string>& args) {
+        if (args.size() < 2) return nullptr; return std::make_unique<DelCommand>(args, args[1]);
     };
-    factory["ZADD"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
-        if (args.size() < 3) return nullptr;
-        return std::make_unique<ZAddCommand>(args, args[1], std::stod(args[2]));
+    factory["ZADD"] = [](const std::vector<std::string>& args) {
+        if (args.size() < 3) return nullptr; return std::make_unique<ZAddCommand>(args, args[1], std::stod(args[2]));
     };
-    factory["BGSAVE"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
-        return std::make_unique<BgSaveCommand>();
+    factory["BGSAVE"] = [](const std::vector<std::string>& args) { return std::make_unique<BgSaveCommand>(); };
+    factory["REPLICAOF"] = [](const std::vector<std::string>& args) { return std::make_unique<ReplicaOfCommand>(); };
+    factory["SUBSCRIBE"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
+        if (args.size() < 2) return nullptr; return std::make_unique<SubscribeCommand>(args[1]);
     };
-    factory["REPLICAOF"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
-        return std::make_unique<ReplicaOfCommand>();
+    factory["PUBLISH"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
+        if (args.size() < 3) return nullptr; return std::make_unique<PublishCommand>(args[1], args[2]);
     };
 }
 
