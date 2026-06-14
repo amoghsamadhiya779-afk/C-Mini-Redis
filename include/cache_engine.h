@@ -1,36 +1,47 @@
-#pragma once
-#include <unordered_map>
-#include <shared_mutex>
+#pragma once 
+#include "data_structures.h"
 #include <mutex>
-#include <string>
 #include <optional>
-
-/*
-==============================================================================
-FILE: cache_engine.h
-PURPOSE: Interface for the core storage engine.
-ARCH: STRICTLY DECLARATIONS ONLY. No logic.
-==============================================================================
-*/
+#include <thread>
+#include <queue>
+#include <condition_variable>
+#include <fstream>
+#include <vector>
 
 class CacheEngine {
 private:
-    std::unordered_map<std::string, std::string> store;
-    mutable std::shared_mutex rw_lock; 
+    LRUHashTable store;
+    SkipList zset; // Global SkipList for simplicity in this project
 
-    // Private constructor for Singleton
-    CacheEngine() = default;
+    // AOF CORE
+    std::queue<std::string> aof_queue;
+    std::mutex aof_mutex;
+    std::condition_variable aof_cv;
+    std::thread aof_thread;
+    bool stop_aof;
+    std::ofstream aof_file;
+
+    CacheEngine();
+    ~CacheEngine();
+
+    void aof_worker();
+    void load_from_aof();
 
 public:
-    // Prevent cloning
     CacheEngine(const CacheEngine&) = delete;
     CacheEngine& operator=(const CacheEngine&) = delete;
 
-    // Meyers' Singleton Accessor
     static CacheEngine& getInstance();
 
-    // ⚠️ NOTICE: Only semicolons here! The logic lives in cache_engine.cpp
-    void set(const std::string& key, const std::string& value);
-    std::optional<std::string> get(const std::string& key) const;
+    // Key-Value Operations (Lock-Free for execution thread)
+    void set(const std::string& key, const std::string& value, long long expire_at = 0);
+    std::optional<std::string> get(const std::string& key);
     bool del(const std::string& key);
+    
+    // Sorted Set Operations
+    void zadd(const std::string& value, double score);
+    std::vector<std::string> zrange(double min_score, double max_score);
+
+    // RDB Persistence
+    void bgsave();
 };

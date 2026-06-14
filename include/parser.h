@@ -2,23 +2,42 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include  <unordered_map>
+#include <unordered_map>
 #include <functional>
-//1.Command Interface
-class ICommand{
-    public:
-    virtual std::string execute()=0;
-    virtual ~ICommand() = default;
 
+// Command Interface
+class ICommand {
+public:
+    virtual std::string execute() = 0;
+    virtual ~ICommand() = default;
 };
 
-//2. Parser Factory Class
-class Parser {
-    private:
-    using CreatorFunc=std::function<std::unique_ptr<ICommand>(const std::vector<std::string>&)>;
+// Singleton Command Factory
+class CommandFactory {
+private:
+    using CreatorFunc = std::function<std::unique_ptr<ICommand>(const std::vector<std::string>&)>;
     std::unordered_map<std::string, CreatorFunc> factory;
+    CommandFactory();
 
 public:
-    Parser();
-    std::unique_ptr<ICommand> parse(const std::string& tcp_payload);
+    static CommandFactory& getInstance();
+    std::unique_ptr<ICommand> create(const std::vector<std::string>& args);
+};
+
+// Stateful RESP Client Parser
+class ClientParser {
+private:
+    std::string buffer;
+    int expected_args;
+    int expected_len;
+    std::vector<std::string> current_args;
+
+    enum State { ARRAY_LEN, BULK_LEN, BULK_STR };
+    State state;
+
+public:
+    ClientParser();
+    // Feeds data, returns a fully parsed command if ready, or nullptr if more data is needed
+    std::unique_ptr<ICommand> parse(const std::string& raw_data);
+    void reset();
 };
