@@ -1,29 +1,30 @@
-# Compiler Settings
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -pthread -Iinclude
-
-# Directories
 SRC_DIR = src
 OBJ_DIR = obj
 
-# Files
-SOURCES = $(wildcard $(SRC_DIR)/*.cpp)
-OBJECTS = $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(SOURCES))
-EXECUTABLE = mini_redis_server
+SERVER_SRCS = $(filter-out src/cli.cpp, $(wildcard $(SRC_DIR)/*.cpp))
+CLI_SRCS = src/cli.cpp
 
-# Default Target
-all: directories $(EXECUTABLE)
+SERVER_OBJS = $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(SERVER_SRCS))
+CLI_OBJS = $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(CLI_SRCS))
+
+all: directories mini_redis_server mini_redis_cli
 
 directories:
 	@mkdir -p $(OBJ_DIR)
 
-$(EXECUTABLE): $(OBJECTS)
+mini_redis_server: $(SERVER_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
-	@echo "✅ Build Complete! Run with ./mini_redis_server"
+	@echo "✅ Server Build Complete!"
+
+mini_redis_cli: $(CLI_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+	@echo "✅ CLI Build Complete!"
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(OBJ_DIR) $(EXECUTABLE)
+	rm -rf $(OBJ_DIR) mini_redis_server mini_redis_cli
 	@echo "🧹 Workspace cleaned!"

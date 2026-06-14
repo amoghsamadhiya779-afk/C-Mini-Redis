@@ -1,6 +1,6 @@
-# Elite Mini-Redis: High-Performance Caching Engine
+# Elite Mini-Redis: Distributed Caching Engine
 
-An advanced, multi-threaded, in-memory caching engine built from scratch in modern C++. Designed to mirror the architecture of real-world Redis, this engine utilizes a Hybrid Threading model, custom Data Structures, and OS-level optimizations to serve concurrent workloads with extreme throughput and sub-millisecond latency.
+An advanced, multi-threaded, in-memory caching engine built from scratch in modern C++. Designed to mirror the architecture of real-world Redis, this engine utilizes a Hybrid Threading model, custom Data Structures, OS-level optimizations, and Distributed System Replication to serve concurrent workloads with extreme throughput and high availability.
 
 ## Elite System Architecture
 
@@ -16,28 +16,44 @@ We abandoned `std::unordered_map` and standard containers to build a high-perfor
 - **Skip Lists (`ZSET`)**: A probabilistic multi-layered linked list enabling $O(\log N)$ inserts, deletes, and range queries for Sorted Sets.
 - **TTL (Time-To-Live)**: Lazy evaluation for key expiration.
 
-## Persistence Models
+## Distributed Systems: Replication & Persistence
+- **Leader-Follower Replication**: The server supports massive horizontal scaling through asynchronous replication. Any node can be booted as a Follower and automatically stream live data from the Leader.
 - **RDB Snapshotting (`BGSAVE`)**: Utilizes the POSIX `fork()` system call to create a Copy-On-Write (COW) clone of the database in memory, serializing it to disk in the background with zero blocking to the main server.
 - **AOF (Append-Only File)**: A dedicated background thread flushes mutation commands to disk asynchronously.
 
-## Quick Start (Docker)
+## Quick Start (Docker Cluster)
 
-The server is fully containerized to guarantee execution across any host OS, bypassing local dependency hell (and enabling Linux-specific features like `fork()`).
+The server is fully containerized. You can boot a distributed cluster using Docker.
 
-### 1. Build the Engine
+### 1. Build the Engine & CLI
 ```bash
 docker build -t mini-redis:prod .
 ```
 
-### 2. Boot the Server
+### 2. Boot the Leader Node
 ```bash
-docker run -d --rm -p 6379:6379 --name redis_backend mini-redis:prod
+docker run -d --rm --net host --name redis_leader mini-redis:prod ./mini_redis_server --port 6379
 ```
 
-### 3. Connect via TCP Client
-Use `netcat` or `telnet` to connect to the raw socket:
+### 3. Boot the Follower Node (Replication)
 ```bash
-nc localhost 6379
+docker run -d --rm --net host --name redis_follower mini-redis:prod ./mini_redis_server --port 6380 --replicaof 127.0.0.1 6379
+```
+
+### 4. Connect via Custom CLI
+Connect to the Leader to write data:
+```bash
+docker run -it --rm --net host mini-redis:prod ./mini_redis_cli -p 6379
+127.0.0.1:6379> SET user:1 EliteCoder
++OK
+```
+
+Connect to the Follower to verify the replication stream:
+```bash
+docker run -it --rm --net host mini-redis:prod ./mini_redis_cli -p 6380
+127.0.0.1:6380> GET user:1
+$10
+EliteCoder
 ```
 
 ## Supported Commands
@@ -49,5 +65,6 @@ nc localhost 6379
 | **DEL** | `DEL <key>` | $O(1)$ | Deletes a key from memory. |
 | **ZADD**| `ZADD <key> <score>` | $O(\log N)$ | Adds a value to the global Skip List with a given score. |
 | **BGSAVE**| `BGSAVE` | $O(N)$ | Forks a background process to save an RDB snapshot. |
+| **REPLICAOF**| `REPLICAOF` | $O(1)$ | Handshake command used by followers to stream data. |
 
-Developed as an elite deep-dive into Operating Systems, Networking, and Low-Level Algorithm Design.
+Developed as an elite deep-dive into Distributed Systems, Operating Systems, Networking, and Low-Level Algorithm Design.

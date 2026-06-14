@@ -6,11 +6,11 @@
 #include <queue>
 #include <mutex>
 #include <vector>
+#include <string>
 
 #ifndef _WIN32
 #include <poll.h>
 #else
-// For native Windows compilation, though the project targets Docker
 #include <winsock2.h>
 #endif
 
@@ -29,7 +29,6 @@ private:
     std::vector<struct pollfd> fds;
     std::unordered_map<int, std::unique_ptr<ClientParser>> client_parsers;
     
-    // Prevent double I/O dispatch
     std::mutex reading_mutex;
     std::unordered_map<int, bool> client_reading; 
     
@@ -37,11 +36,21 @@ private:
     std::queue<CommandTask> command_queue;
     std::mutex cq_mutex;
 
+    // Replication
+    std::string master_host;
+    int master_port;
+    int master_socket;
+    bool is_replica;
+    std::vector<int> replicas;
+
     void accept_client();
     void handle_client_read(int client_socket);
     void execute_commands();
+    void connect_to_master();
+    void broadcast_to_replicas(const std::string& resp_cmd);
 
 public:
     Server(int p, int io_threads);
+    void set_replica_of(std::string host, int p);
     void start();
 };

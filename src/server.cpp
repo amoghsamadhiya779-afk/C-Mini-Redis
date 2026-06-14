@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 #else
 #pragma comment(lib, "ws2_32.lib")
 #endif
@@ -24,7 +26,66 @@ void set_nonblocking(int sock) {
 #endif
 }
 
-Server::Server(int p, int threads) : port(p), io_pool(threads) {}
+Server::Server(int p, int threads) 
+    : port(p), io_pool(threads), master_port(0), master_socket(-1), is_replica(false) {}
+
+void Server::set_replica_of(std::string host, int p) {
+    master_host = host;
+    master_port = p;
+    is_replica = true;
+}
+
+void Server::connect_to_master() {
+    if (!is_replica) return;
+
+    master_socket = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in serv_addr;
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(master_port);
+
+    if (inet_pton(AF_INET, master_host.c_str(), &serv_addr.sin_addr) <= 0) {
+        // Simple fallback to localhost if inet_pton fails (for docker testing)
+        inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr);
+    }
+
+    if (connect(master_socket, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        std::cerr << "❌ Failed to connect to Leader at " << master_host << ":" << master_port << "\n";
+        master_socket = -1;
+        is_replica = false;
+        return;
+    }
+
+    set_nonblocking(master_socket);
+
+    struct pollfd pfd;
+    pfd.fd = master_socket;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    fds.push_back(pfd);
+
+    client_parsers[master_socket] = std::make_unique<ClientParser>();
+    client_reading[master_socket] = false;
+
+    // Send REPLICAOF handshake
+    std::string handshake = "*1\r\n$9\r\nREPLICAOF\r\n";
+#ifndef _WIN32
+    send(master_socket, handshake.c_str(), handshake.length(), 0);
+#else
+    send(master_socket, handshake.c_str(), handshake.length(), 0);
+#endif
+
+    std::cout << "🔗 Connected to Leader node. Running as Follower.\n";
+}
+
+void Server::broadcast_to_replicas(const std::string& resp_cmd) {
+    for (int rep_sock : replicas) {
+#ifndef _WIN32
+        send(rep_sock, resp_cmd.c_str(), resp_cmd.length(), 0);
+#else
+        send(rep_sock, resp_cmd.c_str(), resp_cmd.length(), 0);
+#endif
+    }
+}
 
 void Server::accept_client() {
     struct sockaddr_in address;
@@ -63,12 +124,10 @@ void Server::handle_client_read(int client_socket) {
 
         if (bytes_read > 0) {
             std::string data(raw_buffer, bytes_read);
-            
-            // Feed to parser
             auto& parser = client_parsers[client_socket];
             while (true) {
                 auto cmd = parser->parse(data);
-                data.clear(); // Only feed once, loop until parse returns nullptr
+                data.clear();
                 
                 if (cmd) {
                     std::lock_guard<std::mutex> lock(cq_mutex);
@@ -79,29 +138,26 @@ void Server::handle_client_read(int client_socket) {
             }
         } else if (bytes_read < 0) {
 #ifndef _WIN32
-            if (err == EAGAIN || err == EWOULDBLOCK) {
+            if (err == EAGAIN || err == EWOULDBLOCK) break;
 #else
-            if (err == WSAEWOULDBLOCK) {
+            if (err == WSAEWOULDBLOCK) break;
 #endif
-                break; // No more data to read right now
-            } else {
-                disconnect = true;
-                break; // Real error
-            }
+            disconnect = true;
+            break;
         } else if (bytes_read == 0) {
             disconnect = true;
-            break; // Client closed connection
+            break;
         }
     }
 
     if (disconnect) {
         std::lock_guard<std::mutex> lock(cq_mutex);
-        command_queue.push({nullptr, client_socket}); // Signal main thread to disconnect
+        command_queue.push({nullptr, client_socket});
     }
 
     {
         std::lock_guard<std::mutex> lk(reading_mutex);
-        client_reading[client_socket] = false; // Release the I/O lock
+        client_reading[client_socket] = false;
     }
 }
 
@@ -112,7 +168,14 @@ void Server::execute_commands() {
         command_queue.pop();
 
         if (task.cmd == nullptr) {
-            // Disconnect signal
+            if (task.client_socket == master_socket) {
+                std::cout << "❌ Connection to Leader lost!\n";
+                master_socket = -1;
+            } else {
+                replicas.erase(std::remove(replicas.begin(), replicas.end(), task.client_socket), replicas.end());
+                std::cout << "Client disconnected: " << task.client_socket << "\n";
+            }
+            
 #ifndef _WIN32
             close(task.client_socket);
 #else
@@ -125,19 +188,29 @@ void Server::execute_commands() {
             
             fds.erase(std::remove_if(fds.begin(), fds.end(), 
                 [&](const pollfd& p) { return p.fd == task.client_socket; }), fds.end());
-            
-            std::cout << "Client disconnected: " << task.client_socket << "\n";
             continue;
         }
 
-        // Execute Command on MAIN THREAD exclusively (Lock-Free Database!)
+        // Replication Check
+        if (task.cmd->is_replicaof()) {
+            replicas.push_back(task.client_socket);
+            std::cout << "🔗 New Follower connected (FD: " << task.client_socket << ")\n";
+        }
+
         std::string response = task.cmd->execute();
+
+        if (task.cmd->is_write()) {
+            broadcast_to_replicas(task.cmd->to_resp());
+        }
         
+        // Do not send responses to the Master to avoid crashing its parser
+        if (task.client_socket != master_socket) {
 #ifndef _WIN32
-        send(task.client_socket, response.c_str(), response.length(), 0);
+            send(task.client_socket, response.c_str(), response.length(), 0);
 #else
-        send(task.client_socket, response.c_str(), response.length(), 0);
+            send(task.client_socket, response.c_str(), response.length(), 0);
 #endif
+        }
     }
 }
 
@@ -177,9 +250,11 @@ void Server::start() {
     pfd.revents = 0;
     fds.push_back(pfd);
 
+    connect_to_master();
+
     while (true) {
 #ifndef _WIN32
-        int poll_count = poll(fds.data(), fds.size(), 10); // 10ms timeout
+        int poll_count = poll(fds.data(), fds.size(), 10);
 #else
         int poll_count = WSAPoll(fds.data(), fds.size(), 10);
 #endif
@@ -201,7 +276,6 @@ void Server::start() {
                             }
                         }
                         
-                        // Farm network parsing out to the I/O Thread Pool
                         if (dispatch) {
                             io_pool.enqueue([this, client_socket] { 
                                 this->handle_client_read(client_socket); 
@@ -212,7 +286,6 @@ void Server::start() {
             }
         }
         
-        // Single-Threaded execution of all parsed commands
         execute_commands();
     }
 }

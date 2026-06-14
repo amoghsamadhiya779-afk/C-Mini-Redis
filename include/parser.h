@@ -9,6 +9,9 @@
 class ICommand {
 public:
     virtual std::string execute() = 0;
+    virtual bool is_write() const { return false; }
+    virtual bool is_replicaof() const { return false; }
+    virtual std::string to_resp() const { return ""; }
     virtual ~ICommand() = default;
 };
 
@@ -37,7 +40,6 @@ private:
 
 public:
     ClientParser();
-    // Feeds data, returns a fully parsed command if ready, or nullptr if more data is needed
     std::unique_ptr<ICommand> parse(const std::string& raw_data);
     void reset();
 };

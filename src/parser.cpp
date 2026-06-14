@@ -2,18 +2,32 @@
 #include "../include/cache_engine.h"
 #include <sstream>
 
+// Helper to convert args back to raw RESP format for replication broadcast
+std::string to_resp_array(const std::vector<std::string>& args) {
+    std::string resp = "*" + std::to_string(args.size()) + "\r\n";
+    for (const auto& arg : args) {
+        resp += "$" + std::to_string(arg.length()) + "\r\n" + arg + "\r\n";
+    }
+    return resp;
+}
+
 // ---------------------------------------------------------
 // COMMAND IMPLEMENTATIONS
 // ---------------------------------------------------------
 class SetCommand : public ICommand {
     std::string key, val;
     long long exp;
+    std::vector<std::string> raw_args;
 public:
-    SetCommand(std::string k, std::string v, long long e=0) : key(k), val(v), exp(e) {}
+    SetCommand(const std::vector<std::string>& args, std::string k, std::string v, long long e=0) 
+        : key(k), val(v), exp(e), raw_args(args) {}
+    
     std::string execute() override {
         CacheEngine::getInstance().set(key, val, exp);
         return "+OK\r\n";
     }
+    bool is_write() const override { return true; }
+    std::string to_resp() const override { return to_resp_array(raw_args); }
 };
 
 class GetCommand : public ICommand {
@@ -29,22 +43,28 @@ public:
 
 class DelCommand : public ICommand {
     std::string key;
+    std::vector<std::string> raw_args;
 public:
-    DelCommand(std::string k) : key(k) {}
+    DelCommand(const std::vector<std::string>& args, std::string k) : key(k), raw_args(args) {}
     std::string execute() override {
         return CacheEngine::getInstance().del(key) ? ":1\r\n" : ":0\r\n";
     }
+    bool is_write() const override { return true; }
+    std::string to_resp() const override { return to_resp_array(raw_args); }
 };
 
 class ZAddCommand : public ICommand {
     std::string key; 
     double score;
+    std::vector<std::string> raw_args;
 public:
-    ZAddCommand(std::string k, double s) : key(k), score(s) {}
+    ZAddCommand(const std::vector<std::string>& args, std::string k, double s) : key(k), score(s), raw_args(args) {}
     std::string execute() override {
         CacheEngine::getInstance().zadd(key, score);
         return ":1\r\n";
     }
+    bool is_write() const override { return true; }
+    std::string to_resp() const override { return to_resp_array(raw_args); }
 };
 
 class BgSaveCommand : public ICommand {
@@ -55,6 +75,14 @@ public:
     }
 };
 
+class ReplicaOfCommand : public ICommand {
+public:
+    std::string execute() override {
+        return "+OK\r\n";
+    }
+    bool is_replicaof() const override { return true; }
+};
+
 // ---------------------------------------------------------
 // COMMAND FACTORY
 // ---------------------------------------------------------
@@ -63,7 +91,7 @@ CommandFactory::CommandFactory() {
         if (args.size() < 3) return nullptr;
         long long exp = 0;
         if (args.size() >= 5 && args[3] == "EX") exp = std::stoll(args[4]);
-        return std::make_unique<SetCommand>(args[1], args[2], exp);
+        return std::make_unique<SetCommand>(args, args[1], args[2], exp);
     };
     factory["GET"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
         if (args.size() < 2) return nullptr;
@@ -71,14 +99,17 @@ CommandFactory::CommandFactory() {
     };
     factory["DEL"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
         if (args.size() < 2) return nullptr;
-        return std::make_unique<DelCommand>(args[1]);
+        return std::make_unique<DelCommand>(args, args[1]);
     };
     factory["ZADD"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
         if (args.size() < 3) return nullptr;
-        return std::make_unique<ZAddCommand>(args[1], std::stod(args[2]));
+        return std::make_unique<ZAddCommand>(args, args[1], std::stod(args[2]));
     };
     factory["BGSAVE"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
         return std::make_unique<BgSaveCommand>();
+    };
+    factory["REPLICAOF"] = [](const std::vector<std::string>& args) -> std::unique_ptr<ICommand> {
+        return std::make_unique<ReplicaOfCommand>();
     };
 }
 
@@ -109,7 +140,6 @@ void ClientParser::reset() {
 std::unique_ptr<ICommand> ClientParser::parse(const std::string& raw_data) {
     buffer += raw_data;
     
-    // Support basic inline commands (like `SET key val\r\n` from netcat)
     if (!buffer.empty() && buffer.front() != '*') {
         size_t pos = buffer.find("\r\n");
         if (pos != std::string::npos) {
@@ -121,13 +151,12 @@ std::unique_ptr<ICommand> ClientParser::parse(const std::string& raw_data) {
             reset();
             return cmd;
         }
-        return nullptr; // Wait for \r\n
+        return nullptr;
     }
 
-    // Stateful RESP Parsing
     while (!buffer.empty()) {
         size_t pos = buffer.find("\r\n");
-        if (pos == std::string::npos) return nullptr; // Wait for more data
+        if (pos == std::string::npos) return nullptr;
 
         std::string line = buffer.substr(0, pos);
 
